@@ -144,7 +144,41 @@ async def conversations(authorization: Optional[str] = Header(default=None)):
     uid = user["id"]
     return await db_request("GET", f"conversation_members?user_id=eq.{uid}&select=conversation_id,conversations(id,title,created_at)", headers={"Prefer": "return=representation"})
 
-@app.get("/api/messages/{conversation_id}")
+
+class NewConversation(BaseModel):
+    recipient_id: str
+
+@app.get("/api/users")
+async def search_users(q: str = "", authorization: Optional[str] = Header(default=None)):
+    user = await require_user(authorization)
+    term = q.strip().replace(",", " ")[:60]
+    if not term:
+        return []
+    uid = user["id"]
+    return await db_request("GET", f"profiles?id=neq.{uid}&or=(username.ilike.*{term}*,display_name.ilike.*{term}*)&select=id,username,display_name,avatar_url&limit=20")
+
+@app.post("/api/conversations")
+async def create_conversation(payload: NewConversation, authorization: Optional[str] = Header(default=None)):
+    user = await require_user(authorization)
+    uid = user["id"]
+    if payload.recipient_id == uid:
+        raise HTTPException(400, "لا يمكنك بدء محادثة مع حسابك.")
+    existing = await db_request(
+        "GET",
+        f"conversation_members?user_id=eq.{uid}&select=conversation_id,conversations!inner(id,conversation_members!inner(user_id))"
+    )
+    for row in existing or []:
+        members = row.get("conversations", {}).get("conversation_members", [])
+        if {m.get("user_id") for m in members} == {uid, payload.recipient_id}:
+            return {"id": row["conversation_id"]}
+    created = await db_request("POST", "conversations", json={"title": "محادثة خاصة"}, headers={"Prefer": "return=representation"})
+    conversation_id = created[0]["id"]
+    await db_request("POST", "conversation_members", json=[
+        {"conversation_id": conversation_id, "user_id": uid},
+        {"conversation_id": conversation_id, "user_id": payload.recipient_id},
+    ], headers={"Prefer": "return=minimal"})
+    return {"id": conversation_id}
+\n@app.get("/api/messages/{conversation_id}")
 async def get_messages(conversation_id: str, authorization: Optional[str] = Header(default=None)):
     user = await require_user(authorization)
     uid = user["id"]
