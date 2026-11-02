@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 from typing import Optional
 
 import httpx
@@ -136,7 +137,9 @@ async def generate_image(payload: ImagePrompt, authorization: Optional[str] = He
     if response.status_code >= 400:
         raise HTTPException(502, "فشل مزود توليد الصور.")
     data = response.json()
-    return {"image": data.get("data", [{}])[0].get("url"), "revised_prompt": data.get("data", [{}])[0].get("revised_prompt")}
+    item = data.get("data", [{}])[0]
+    image_url = item.get("url") or (f"data:image/png;base64,{item['b64_json']}" if item.get("b64_json") else None)
+    return {"image": image_url, "revised_prompt": item.get("revised_prompt")}
 
 @app.get("/api/conversations")
 async def conversations(authorization: Optional[str] = Header(default=None)):
@@ -151,7 +154,7 @@ class NewConversation(BaseModel):
 @app.get("/api/users")
 async def search_users(q: str = "", authorization: Optional[str] = Header(default=None)):
     user = await require_user(authorization)
-    term = q.strip().replace(",", " ")[:60]
+    term = re.sub(r"[^a-zA-Z0-9_\-\u0600-\u06FF ]", "", q.strip())[:60]
     if not term:
         return []
     uid = user["id"]
@@ -163,14 +166,6 @@ async def create_conversation(payload: NewConversation, authorization: Optional[
     uid = user["id"]
     if payload.recipient_id == uid:
         raise HTTPException(400, "لا يمكنك بدء محادثة مع حسابك.")
-    existing = await db_request(
-        "GET",
-        f"conversation_members?user_id=eq.{uid}&select=conversation_id,conversations!inner(id,conversation_members!inner(user_id))"
-    )
-    for row in existing or []:
-        members = row.get("conversations", {}).get("conversation_members", [])
-        if {m.get("user_id") for m in members} == {uid, payload.recipient_id}:
-            return {"id": row["conversation_id"]}
     created = await db_request("POST", "conversations", json={"title": "محادثة خاصة"}, headers={"Prefer": "return=representation"})
     conversation_id = created[0]["id"]
     await db_request("POST", "conversation_members", json=[
